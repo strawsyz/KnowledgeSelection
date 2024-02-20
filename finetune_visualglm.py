@@ -7,6 +7,7 @@ from sat.training.deepspeed_training import training_main
 from model import VisualGLMModel
 from sat.model.finetune import PTuningV2Mixin
 from sat.model.finetune.lora2 import LoraMixin
+import numpy as np
 
 class FineTuneVisualGLMModel(VisualGLMModel):
     def __init__(self, args, transformer=None, parallel_output=True, **kw_args):
@@ -83,16 +84,20 @@ def forward_step(data_iterator, model, args, timers):
     tokens, labels, image, pre_image = get_batch(
         data_iterator, args, timers)
     timers('batch generator').stop()
-
+#     print("image size", image.shape)  # [batch_size,3,224,224]
     logits = model(input_ids=tokens, image=image, pre_image=pre_image)[0]
     dtype = logits.dtype
     lm_logits = logits.to(torch.float32)
-
+    
+#     print("lm_logits:",lm_logits.shape)  # [4,320,130528]
+#     print("labels:",labels.shape)  # [4,320]
+    
     # Shift so that tokens < n predict n
     shift_logits = lm_logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
     # Flatten the tokens
     loss_fct = CrossEntropyLoss(ignore_index=-100)
+#     print("labels shape", shift_labels.view(-1).shape)   # 1276
     loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
     lm_logits = lm_logits.to(dtype)
@@ -108,8 +113,10 @@ from PIL import Image
 class FewShotDataset(Dataset):
     def __init__(self, path, processor, tokenizer, args):
         max_seq_length = args.max_source_length + args.max_target_length
+        print(path)
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+#         print(data)
         self.images = []
         self.input_ids = []
         self.labels = []
@@ -172,14 +179,8 @@ if __name__ == '__main__':
     known, args_list = py_parser.parse_known_args()
     args = get_args(args_list)
     args = argparse.Namespace(**vars(args), **vars(known))
-    args.device = 'cpu'
-
-    model_type = 'visualglm-6b'
-    model, args = FineTuneVisualGLMModel.from_pretrained(model_type, args)
-    if torch.cuda.is_available():
-        model = model.to('cuda')
-    tokenizer = get_tokenizer(args)
-    label_pad_token_id = -100 if args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+    args.device = 'gpu'
+    
     def data_collator(examples):
         for example in examples:
             example['input_ids'] = torch.tensor(example['input_ids'], dtype=torch.long)
@@ -191,4 +192,54 @@ if __name__ == '__main__':
             'pre_image': example['pre_image']
         }
         return ret
+    
+    model_type = 'visualglm-6b'
+#     model_type = './checkpoints/finetune-visualglm-6b-01-28-14-39'  # five dataset finetuning
+#     model_type = "./checkpoints/finetune-visualglm-6b-02-06-17-45/"  # eleven dataset finetuning　21k iters
+#     model_type = "./checkpoints/finetune-visualglm-6b-02-10-10-43"  # 3k Caltech101
+    model_type = r"checkpoints/finetune-visualglm-6b-02-09-15-14/"  # 3k Caltech256
+    model, args = FineTuneVisualGLMModel.from_pretrained(model_type, args)
+    freeze = False
+    freeze_module_names = [
+#         'transformer.layers.0.attention.dense.matrix_A.0',
+#      'transformer.layers.0.attention.dense.matrix_B.0',
+#      'transformer.layers.0.attention.dense.original.bias',
+#      'transformer.layers.0.attention.dense.original.weight',
+#      'transformer.layers.0.attention.query_key_value.matrix_A.0',
+#      'transformer.layers.0.attention.query_key_value.matrix_A.1',
+#      'transformer.layers.0.attention.query_key_value.matrix_A.2',
+#      'transformer.layers.0.attention.query_key_value.matrix_B.0',
+#      'transformer.layers.0.attention.query_key_value.matrix_B.1',
+#      'transformer.layers.0.attention.query_key_value.matrix_B.2',
+     'transformer.layers.0.attention.query_key_value.original.bias',
+     'transformer.layers.0.attention.query_key_value.original.weight',
+#      'transformer.layers.14.attention.dense.matrix_A.0',
+#      'transformer.layers.14.attention.dense.matrix_B.0',
+#      'transformer.layers.14.attention.dense.original.bias',
+#      'transformer.layers.14.attention.dense.original.weight',
+#      'transformer.layers.14.attention.query_key_value.matrix_A.0',
+#      'transformer.layers.14.attention.query_key_value.matrix_A.1',
+#      'transformer.layers.14.attention.query_key_value.matrix_A.2',
+#      'transformer.layers.14.attention.query_key_value.matrix_B.0',
+#      'transformer.layers.14.attention.query_key_value.matrix_B.1',
+#      'transformer.layers.14.attention.query_key_value.matrix_B.2',
+     'transformer.layers.14.attention.query_key_value.original.bias',
+     'transformer.layers.14.attention.query_key_value.original.weight'
+                          ]
+    
+#     print(model)
+#     freeze_module_names = ["weight"]
+    if freeze:
+        for name, param in model.named_parameters():
+            for freeze_name in freeze_module_names:
+                if freeze_name == name:
+                    param.requires_grad = False
+                    print(f"freeze {name}")
+    
+#     train model
+    if torch.cuda.is_available():
+        model = model.to('cuda')
+    tokenizer = get_tokenizer(args)
+    label_pad_token_id = -100 if args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+    # 在下面的代码中，初始化optimizer等
     training_main(args, model_cls=model, forward_step_function=forward_step, create_dataset_function=create_dataset_function, collate_fn=data_collator)

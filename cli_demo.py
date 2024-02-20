@@ -73,6 +73,11 @@ def main():
                 if query == "stop":
                     sys.exit(0)
                 try:
+#                     if cache_image is None:
+#                     else:
+#                         print(f"image: {cache_image}")
+                    print(f"image: {image_path}")
+                    print(f"query: {query}")
                     response, history, cache_image = chat(
                         image_path, 
                         model, 
